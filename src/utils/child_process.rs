@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{atomic::AtomicBool, Arc};
 use xdg::BaseDirectories;
+use std::fs::File;
+use std::io::BufRead;
 
 pub struct Nanny {}
 
@@ -56,9 +58,59 @@ impl Nanny {
     }
 }
 
-fn boot_desktop_file(path: &PathBuf) -> std::io::Result<Child> {
-    let args = format!( "`grep '^Exec' {:?} | tail -1 | sed 's/^Exec=//' | sed 's/%.//' | sed 's/^\"//g' | sed 's/\" *$//g'`", path );
+fn boot_desktop_file(path: &PathBuf) -> io::Result<Child> {
+    let entries = parse_desktop_file(path)?;
+
+    if let Some(hidden) = entries.get("Hidden") {
+        if hidden == "true" {
+            return io::Err("Hidden Desktop File");
+        }
+    }
+    // TODO: if TERMINAL is set to true then find users default terminal-emulator and execute within
+    let args = match entries.get("Exec") {
+        Some(exec) => sanitize_exec(exec),
+        None() => return io::Err("Exec key not found"),
+    };
+    // // from: https://askubuntu.com/questions/5172/running-a-desktop-file-in-the-terminal
+    //let args = format!("`grep '^Exec' {:?} | tail -1 | sed 's/^Exec=//' | sed 's/%.//' | sed 's/^\"//g' | sed 's/\" *$//g'`", path);
     Command::new("sh").arg("-c").arg(args).spawn()
+}
+
+fn sanitize_exec(exec: &String) -> String {
+    // TODO: sanitize command -> e.g. remove %U, un-escape stuff,
+    //  https://developer.gnome.org/desktop-entry-spec/#exec-variables
+    // TODO
+    format!("`echo "{}" | sed 's/%.//' | sed 's/^\"//g' | sed 's/\" *$//g'`", exec)
+}
+
+// reads desktop file from path and return its entries as key-value pairs in a HashMap.
+// if a key exists multiple times the last value is finally used.
+fn parse_desktop_file(path: &PathBuf) -> io::Result<HashMap<String, String>> {
+    let mut entries = HashMap::new();
+    let lines = read_lines(path)?;
+    for line in lines {
+        if let Ok(line) = line {
+            // remove trailing newlines and filter comments and empty lines
+            let line = line.trim();
+            if line.starts_with("#") || line == "" {
+                continue;
+            }
+
+            // split line into key-value pairs with the first "=" as a separator
+            let mut splitter = line.splitn(2, '=');
+            let key = splitter.next()?;
+            let value = splitter.next()?;
+
+            entries.insert(String::from(key), String::from(value));
+        }
+    }
+    Ok(entries)
+}
+
+// reads a file and returns iterator over its lines
+fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>> where P: AsRef<Path> {
+    let file = File::open(filename)?;
+    Ok(io::BufReader::new(file).lines())
 }
 
 // get all the .desktop files in a folder
@@ -121,7 +173,7 @@ impl Children {
 }
 
 impl FromIterator<Child> for Children {
-    fn from_iter<T: IntoIterator<Item = Child>>(iter: T) -> Self {
+    fn from_iter<T: IntoIterator<Item=Child>>(iter: T) -> Self {
         Self {
             inner: iter
                 .into_iter()
@@ -132,7 +184,7 @@ impl FromIterator<Child> for Children {
 }
 
 impl Extend<Child> for Children {
-    fn extend<T: IntoIterator<Item = Child>>(&mut self, iter: T) {
+    fn extend<T: IntoIterator<Item=Child>>(&mut self, iter: T) {
         self.inner
             .extend(iter.into_iter().map(|child| (child.id(), child)))
     }

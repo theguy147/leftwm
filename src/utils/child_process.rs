@@ -1,14 +1,16 @@
-use crate::errors::Result;
 use std::collections::HashMap;
 use std::fs;
+use std::fs::File;
 use std::io;
+use std::io::{BufRead, stderr};
 use std::iter::{Extend, FromIterator};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
+
 use xdg::BaseDirectories;
-use std::fs::File;
-use std::io::BufRead;
+
+use crate::errors::{Result, LeftError, LeftErrorKind};
 
 pub struct Nanny {}
 
@@ -60,16 +62,20 @@ impl Nanny {
 
 fn boot_desktop_file(path: &PathBuf) -> io::Result<Child> {
     let entries = parse_desktop_file(path)?;
+    // let entries = match parse_desktop_file(path) {
+    //     Ok(entries) => entries,
+    //     Err(err) => return Err(err)
+    // };
 
     if let Some(hidden) = entries.get("Hidden") {
         if hidden == "true" {
-            return io::Err("Hidden Desktop File");
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "hidden desktop file")); // hack
         }
     }
     // TODO: if TERMINAL is set to true then find users default terminal-emulator and execute within
     let args = match entries.get("Exec") {
         Some(exec) => sanitize_exec(exec),
-        None() => return io::Err("Exec key not found"),
+        None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "could not find Exec key")), // hack
     };
     // // from: https://askubuntu.com/questions/5172/running-a-desktop-file-in-the-terminal
     //let args = format!("`grep '^Exec' {:?} | tail -1 | sed 's/^Exec=//' | sed 's/%.//' | sed 's/^\"//g' | sed 's/\" *$//g'`", path);
@@ -80,7 +86,7 @@ fn sanitize_exec(exec: &String) -> String {
     // TODO: sanitize command -> e.g. remove %U, un-escape stuff,
     //  https://developer.gnome.org/desktop-entry-spec/#exec-variables
     // TODO
-    format!("`echo "{}" | sed 's/%.//' | sed 's/^\"//g' | sed 's/\" *$//g'`", exec)
+    format!("`echo \"{}\" | sed 's/%.//' | sed 's/^\\\"//g' | sed 's/\\\" *$//g'`", exec)
 }
 
 // reads desktop file from path and return its entries as key-value pairs in a HashMap.
@@ -98,10 +104,12 @@ fn parse_desktop_file(path: &PathBuf) -> io::Result<HashMap<String, String>> {
 
             // split line into key-value pairs with the first "=" as a separator
             let mut splitter = line.splitn(2, '=');
-            let key = splitter.next()?;
-            let value = splitter.next()?;
+            let key = splitter.next().unwrap_or_default();
+            let value = splitter.next().unwrap_or_default();
 
-            entries.insert(String::from(key), String::from(value));
+            if key != "" {
+                entries.insert(String::from(key), String::from(value));
+            }
         }
     }
     Ok(entries)
